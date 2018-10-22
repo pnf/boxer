@@ -17,11 +17,14 @@ class DemoPlugin(val global: Global) extends Plugin {
 
   private val EntityAnnotName = TypeName("entity")
   private val NodeAnnotName = TypeName("node")
+  private val Node2AnnotName = TypeName("node2")
   private lazy val TypeInfoClass = rootMirror.staticClass("demo.TypeInfo")
 
   case class EntityClassDefAttachment(caseClass: ClassDef)
 
   object PropInfo
+
+  object PropVal
 
   object macroPlugin extends analyzer.MacroPlugin with analyzer.AnalyzerPlugin {
     override def isActive(): Boolean = phase.id <= currentRun.typerPhase.id
@@ -39,6 +42,25 @@ class DemoPlugin(val global: Global) extends Plugin {
       }
     }
     override def pluginsTypeSig(tpe: Type, typer: analyzer.Typer, defTree: Tree, pt: Type): Type = defTree match {
+
+      case vdd: ValOrDefDef if vdd.mods.hasAnnotationNamed(Node2AnnotName) =>
+        val cls = typer.namer.context.owner
+        val sillyName = TermName(vdd.name + "$silly")
+        val sillySym =
+          if(cls.isTrait)
+            cls.newMethod(sillyName, vdd.pos.focus, newFlags = Flags.ACCESSOR)
+          else
+            cls.newVariable(sillyName, vdd.pos.focus)
+        sillySym setInfoAndEnter sillyTypeCompleter(vdd)
+        typer.namer.context.unit.synthetics(sillySym) = atPos(vdd.pos)(ValDef(sillySym, EmptyTree /* Literal(Constant(-42)) */))
+        if(cls.isTrait) {
+          val setterSym = cls.newMethodSymbol(sillySym.name.setterName, vdd.pos.focus, newFlags = Flags.ACCESSOR)
+          val setterParams = setterSym.newSyntheticValueParams(definitions.IntTpe :: Nil)
+          setterSym.setInfoAndEnter(MethodType(setterParams, definitions.UnitTpe))
+          typer.namer.context.unit.synthetics(setterSym) = atPos(vdd.pos)(DefDef(setterSym, EmptyTree))
+        }
+        tpe
+
       case tmpl: Template =>
         val templateNamer = typer.namer
         val clazz = typer.context.owner
@@ -58,9 +80,10 @@ class DemoPlugin(val global: Global) extends Plugin {
                       propSym setInfo propTypeCompleter(vdd)
                       templateNamer.enterInScope(propSym)
                       templateNamer.context.unit.synthetics(propSym) = atPos(vdd.pos.focus)(DefDef(propSym, EmptyTree))
-                      
+
                       // We'll fill in the body of the method after typer
                       propSym.updateAttachment(PropInfo)
+
                     }
                 }
               }
@@ -70,6 +93,12 @@ class DemoPlugin(val global: Global) extends Plugin {
         tpe
       case _ =>
         tpe
+    }
+  }
+
+  def sillyTypeCompleter(nodeDef: ValOrDefDef): analyzer.TypeCompleter = new analyzer.TypeCompleterBase[Tree](nodeDef) {
+    override def completeImpl(sym: global.analyzer.global.Symbol): Unit = {
+      sym.setInfo(NullaryMethodType(nodeDef.tpe.resultType))
     }
   }
 
@@ -108,18 +137,20 @@ class DemoPlugin(val global: Global) extends Plugin {
             if (cls.name.string_==("T")) {
 
               val getterSym = cls.newMethodSymbol(TermName("foo$impl"), cls.pos.focus, newFlags = Flags.ACCESSOR)
+              // getterSym.setFlag(Flags.STABLE)
               getterSym.setInfoAndEnter(NullaryMethodType(definitions.IntTpe))
-              val getter = localTyper.typedPos(getterSym.pos.focus)(ValDef(getterSym, Literal(Constant(-42))))
+              val getter = localTyper.typedPos(getterSym.pos.focus)(ValDef(getterSym, EmptyTree /* Literal(Constant(-42)) */))
 
               val setterSym = cls.newMethodSymbol(getterSym.name.setterName, cls.pos.focus, newFlags = Flags.ACCESSOR)
               val setterParams = setterSym.newSyntheticValueParams(definitions.IntTpe :: Nil)
               setterSym.setInfoAndEnter(MethodType(setterParams, definitions.UnitTpe))
               val setter = localTyper.typedPos(setterSym.pos.focus)(DefDef(setterSym, EmptyTree))
 
-              super.transform(treeCopy.Template(templ, templ.parents, templ.self, templ.body ::: (getter :: setter :: Nil)))
+              super.transform(treeCopy.Template(templ, templ.parents, templ.self, templ.body ::: (getter :: /* setter :: */ Nil)))
             } else {
               super.transform(templ)
             }
+
           case dd: DefDef if dd.symbol.hasAttachment[PropInfo.type] =>
             val derived = deriveDefDef(dd) { _ =>
               val propInfoType = dd.symbol.info.finalResultType.typeArgs.head
